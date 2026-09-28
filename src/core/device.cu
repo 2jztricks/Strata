@@ -30,7 +30,11 @@ DeviceInfo device_info(int ordinal) {
     int count = 0;
     check(cudaGetDeviceCount(&count), "cudaGetDeviceCount");
     if (count == 0) {
+#if defined(STRATA_USE_HIP)
+        throw CudaError("no HIP device is present; this backend targets gfx1100 wave32", -1);
+#else
         throw CudaError("no CUDA device is present; Strata targets sm_120 (RTX 5000 series)", -1);
+#endif
     }
     if (ordinal < 0 || ordinal >= count) {
         throw CudaError("device ordinal " + std::to_string(ordinal) + " is out of range (have " +
@@ -59,12 +63,18 @@ DeviceInfo device_info(int ordinal) {
     // The engine is written against sm_120.  Compiling for it is enforced by CMake; RUNNING on something else
     // is caught here, because a binary can be carried to a machine with an older card and would otherwise
     // silently take whatever path the driver chose.
+#if defined(STRATA_USE_HIP)
+    if (std::strncmp(p.gcnArchName, "gfx1100", 7) != 0 || p.warpSize != 32) {
+        throw CudaError("HIP backend requires validated gfx1100 wave32 hardware", -1);
+    }
+#else
     if (d.cc_major != 12) {
         throw CudaError("device " + d.name + " reports compute capability " + std::to_string(d.cc_major) +
                             "." + std::to_string(d.cc_minor) +
                             "; Strata targets sm_120 (RTX 5000 series / Blackwell) only",
                         -1);
     }
+#endif
     return d;
 }
 
