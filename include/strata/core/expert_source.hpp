@@ -42,7 +42,7 @@ class ExpertSource {
 public:
     virtual ~ExpertSource() = default;
 
-    /// The 1,382,400-byte blob for `(layer, expert)`, or nullptr if it cannot be produced.
+    /// The expert-layout blob for `(layer, expert)`, or nullptr if it cannot be produced.
     ///
     /// The pointer only has to stay valid until the next `blob()` call: with `h = 0` every expert is computed
     /// immediately and nothing is retained.  A CACHING source must return pointers into the cache, not into a
@@ -270,7 +270,7 @@ public:
     FileExpertSource(const FileExpertSource&) = delete;
     FileExpertSource& operator=(const FileExpertSource&) = delete;
 
-    /// Maps `<pack_dir>/experts.bin` and checks its size against `n_layers * n_expert * BLOB`.
+    /// Maps `<pack_dir>/experts.bin` and checks its size against the loaded expert layout.
     ///
     /// The size check is not a formality: a short file would fault at the END of a long sequence, and an
     /// over-long one means the pack is not the one the geometry came from.  Refuses with the two numbers.
@@ -287,10 +287,16 @@ public:
     int64_t reads() const override { return reads_; }
 
 private:
+    const uint8_t* mapped_blob(int64_t layer, int64_t expert) const;
+
     const uint8_t* base_ = nullptr;
     int64_t blobs_ = 0;
+    int64_t n_layers_ = 0;
     int64_t n_expert_ = 0;
     int64_t reads_ = 0;
+    uint64_t mapped_bytes_ = 0;
+    std::vector<uint64_t> layer_offsets_;
+    std::vector<uint64_t> layer_blob_bytes_;
 #if defined(_WIN32)
     void* file_ = nullptr;
     void* mapping_ = nullptr;
