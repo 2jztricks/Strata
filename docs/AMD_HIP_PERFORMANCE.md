@@ -66,8 +66,8 @@ Never use cancelled-request timing lines as throughput evidence.
 
 ## Final revision benchmark
 
-Measured on 2026-09-29, source revision `b90591e88ce806da6e6966d2e5d45b444d040190`.
-HIP executable SHA-256: `5ca416d9864b5fddad54fb2310707675c4a10e8cd19cb0ab7d8371f4d4b057f0`.
+Measured on 2026-09-29, source revision `9568e78da663e6b224ab96d57baf450717b36e73`.
+HIP executable SHA-256: `705f5925a788bc227bad72abfb5466032e0879d752fea9afc3eb32051b35182b`.
 The control and candidate below were both measured anew in this session; no
 historical benchmark values are mixed into the table. The control binary SHA-256
 is `4522d4937ca4a41ca294d31b60df8c2bc4df5b7a6caf65eaad10c036e08491f7`;
@@ -79,17 +79,17 @@ Sampling: temperature 0, top-k 1, top-p 1, min-p 0, seed 42, reasoning disabled.
 
 | Fresh request, execution order | Control prefill t/s | Candidate prefill t/s | Candidate output t/s | Candidate request wall time |
 | --- | ---: | ---: | ---: | ---: |
-| 4,210 tokens, first use | 240.0 | 437.6 | 54.0 | 12.000 s |
-| 8,830 tokens, first use at this size | 484.8 | 863.4 | 53.1 | 12.654 s |
-| 4,210 tokens, warmed | 457.2 | 878.8 | 55.1 | 7.122 s |
-| 8,830 tokens, warmed | 478.9 | 968.2 | 57.5 | 11.363 s |
+| 4,210 tokens, first use | 240.0 | 447.5 | 55.5 | 11.729 s |
+| 8,830 tokens, first use at this size | 484.8 | 873.7 | 55.7 | 12.420 s |
+| 4,210 tokens, warmed | 457.2 | 901.1 | 56.7 | 6.937 s |
+| 8,830 tokens, warmed | 478.9 | 966.5 | 59.2 | 11.314 s |
 
 Each request generated exactly 128 tokens and finished at the intentional length
 cap. All four fresh prompts had zero reused KV tokens. Fresh-prompt prefill was
-1.78–2.02x the freshly measured existing AMD runtime; fresh-request wall time was
-39–46% lower. This is a comparison with our existing HIP runtime, not unmodified
+1.80–2.02x the freshly measured existing AMD runtime; fresh-request wall time was
+40–46% lower. This is a comparison with our existing HIP runtime, not unmodified
 upstream, which does not provide this backend. The candidate also completed four
-cached follow-ups in 3.06–3.40 seconds. Those follow-ups are not apples-to-apples
+cached follow-ups in 2.95–3.26 seconds. Those follow-ups are not apples-to-apples
 prefill comparisons: cache reuse differs with generated text and checkpoint
 selection. Full sanitized measurements are in
 [the fresh-run JSON](benchmarks/2026-09-29-gfx1100.json).
