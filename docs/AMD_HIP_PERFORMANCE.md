@@ -122,8 +122,8 @@ was approximately 0.0026 against raw-FP32/dequantized-weight reference, reflecti
 Q8 activation arithmetic; this is not bitwise numerical equivalence.
 
 End-to-end coding quality is not established by these numerical checks or capped
-throughput requests. Earlier coding trials did not demonstrate a successful repair,
-so this contribution makes no broad answer-quality or agentic-reliability claim.
+throughput requests. Validate completed tasks with independent runtime tests; this
+contribution makes no broad answer-quality or agentic-reliability claim.
 
 The changes do not claim better model reasoning, verified full-context behavior,
 end-to-end vision validation, Windows HIP, other AMD architectures, or mixed
