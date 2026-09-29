@@ -7,14 +7,15 @@ wave64, Windows HIP, and mixed AMD/NVIDIA execution are outside this contributio
 The backend maps the CUDA-shaped runtime and BLAS calls to HIP/hipBLAS, uses
 RDNA3's signed integer dot instruction for quantized kernels, and supplies
 wave32 shuffle/packed-byte operations. CUDA-only QSA matrix instructions have
-an ordered FP32 fallback. Prefill uses dequantization plus hipBLAS GEMM; the
-CUDA ggml MMQ path is not compiled for HIP. This does not claim CUDA tensor-core
-performance or bit-identical answers across the two backends.
+an ordered FP32 fallback. Prefill supports both dequantization plus hipBLAS GEMM and opt-in HIP ggml MMQ.
+An optional, calibrated hipBLASLt path accelerates dense projections on gfx1100.
+This does not claim bit-identical model answers across backends. See
+[performance settings and evidence](AMD_HIP_PERFORMANCE.md).
 
 ## Build
 
 Requirements: a working ROCm driver/runtime, HIP development headers and
-compiler, hipBLAS development files, CMake 3.24+, a C++20 host compiler, and Git.
+compiler, hipBLAS and (for tuned dense prefill) hipBLASLt development files, CMake 3.24+, a C++20 host compiler, and Git.
 The model still needs sufficient system RAM and fast SSD storage for its PLE
 table. VRAM occupancy alone is not a throughput measurement.
 
@@ -82,7 +83,11 @@ The automatic installer,
 vision helper, local gateway integrations, and multi-GPU experiments are not
 included in this backend patch.
 
-## Validation
+## Original backend validation (PR #94)
+
+The following is historical validation of the original backend, not a fresh
+test count for this replacement. Current build/test evidence and performance
+limits are recorded in [AMD_HIP_PERFORMANCE.md](AMD_HIP_PERFORMANCE.md).
 
 Tested against upstream `c1e903310f211e6630780c3bd2038778c071c68d` (0.1.20),
 with pinned llama.cpp `3cf03257f219afbe7334045ff7c6a06ac68c627d`.
@@ -128,6 +133,6 @@ ctest --test-dir build-hip --output-on-failure --timeout 60 \
 test from passing. These are explicit exclusions, not skipped tests counted as
 passes. Additional unpublished upstream fixture suites are not covered.
 
-Earlier throughput measurements from a larger private working branch are not
-results of this patch. Vision, long-context stress, broad answer-quality
+The published performance table explicitly identifies the measured development
+snapshot; it must not be read as a benchmark of every subsequent rebase. Vision, long-context stress, broad answer-quality
 equivalence, other AMD cards, and mixed-vendor inference are not validated here.

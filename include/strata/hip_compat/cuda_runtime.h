@@ -6,6 +6,8 @@
 #undef __noinline__
 #endif
 #define cudaDevAttrMaxSharedMemoryPerBlockOptin hipDeviceAttributeMaxSharedMemoryPerBlock
+#define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
+#define cudaDevAttrClockRate hipDeviceAttributeClockRate
 #define cudaDeviceGetAttribute hipDeviceGetAttribute
 #define cudaDeviceProp hipDeviceProp_t
 #define cudaDeviceSynchronize hipDeviceSynchronize

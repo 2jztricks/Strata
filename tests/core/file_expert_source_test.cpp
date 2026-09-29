@@ -183,10 +183,33 @@ void test_native_variable_layout() {
 }
 #endif
 
+void test_complement_plan() {
+    using namespace strata::core::detail;
+    std::vector<uint64_t> offsets;
+    uint64_t bytes = 0;
+    std::string error;
+    require(make_cache_complement_plan(2, 3, {3, 5}, {{0, 1}, {1, 2}}, {}, offsets, bytes, error), error);
+    require(bytes == 16 && offsets == std::vector<uint64_t>{0, kNoCacheComplement, 3, 6, 11, kNoCacheComplement},
+            "wrong compact offsets for variable native layer sizes");
+    const uint8_t resident[16] = {}, mapped[5] = {};
+    require(cache_complement_blob_or_fallback(1, offsets, resident, mapped) == mapped,
+            "GPU-resident expert lost mmap fallback");
+    require(cache_complement_blob_or_fallback(4, offsets, resident, mapped) == resident + 11,
+            "CPU miss did not use resident complement");
+    require(!make_cache_complement_plan(2, 3, {3, 5}, {{0, 1}, {0, 1}}, {}, offsets, bytes, error)
+            && offsets.empty() && bytes == 0, "duplicate pair accepted");
+    require(!make_cache_complement_plan(2, 3, {3, 5}, {{0, 1}}, {{0, 1}}, offsets, bytes, error),
+            "overlapping tiers accepted");
+    require(!make_cache_complement_plan(2, 3, {3, 5}, {{2, 0}}, {}, offsets, bytes, error),
+            "out-of-range pair accepted");
+    require(!make_cache_complement_plan(2, 3, {0, 5}, {}, {}, offsets, bytes, error), "zero-size layer accepted");
+}
+
 }  // namespace
 
 int main() {
     try {
+        test_complement_plan();
         test_canonical_layout();
 #if defined(STRATA_NATIVE_EXPERTS)
         test_native_variable_layout();

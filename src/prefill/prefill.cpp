@@ -2,6 +2,7 @@
 #include "strata/prefill/prefill.hpp"
 #include "strata/core/progress.hpp"
 #include "strata/core/on_device.hpp"
+#include "strata/core/native_head.hpp"
 
 #include "strata/core/layout.hpp"
 #include "strata/kernels/cpu/expert.hpp"
@@ -30,6 +31,8 @@
 #include <cstdio>
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -84,6 +87,11 @@ inline int ring_slots(size_t T) {
 constexpr int DQ = 2;              // dequantized-expert ring (FP16 gate/up + down)
 
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
+
+bool prefill_env_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && std::atoi(value) != 0;
+}
 
 // Either cudaMalloc (owned, freed with the object) or a bump allocation from a borrowed region; with no base and
 // no region it only counts, which is how `bytes_needed` sizes the region.
@@ -255,6 +263,8 @@ struct Prefill::Impl {
     uint16_t* attn_h = nullptr;
     int32_t* steps_dev = nullptr;
     std::vector<int32_t> steps_host;
+    int32_t* embed_tokens_dev = nullptr;
+    std::vector<int32_t> embed_tokens_host;
     int32_t* sel_ids = nullptr;
     float* sel_scores = nullptr;          // [sel_batch, max_blocks]
     int64_t sel_batch = 256, max_blocks = 0;
@@ -340,6 +350,7 @@ Prefill::Prefill() : impl_(new Impl) {}
 Prefill::~Prefill() {
     if (!impl_) return;
     if (impl_->cs) cudaStreamSynchronize(impl_->cs);
+    if (impl_->copy) cudaStreamSynchronize(impl_->copy);
     for (int i = 0; i < RING_MAX; ++i) {
         if (impl_->copied[i]) cudaEventDestroy(impl_->copied[i]);
         if (impl_->used[i]) cudaEventDestroy(impl_->used[i]);
@@ -456,6 +467,17 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
     m.T_max = chunk;
     m.borrowed = borrow != nullptr;
     bool ok = true;
+    if (prefill_env_enabled("STRATA_PF_EMBED_BATCH")) {
+        m.embed_tokens_host.resize(T);
+        void* ids = nullptr;
+        if (cudaMalloc(&ids, T * sizeof(int32_t)) == cudaSuccess) {
+            m.embed_tokens_dev = (int32_t*) ids;
+            m.owned.push_back(ids);
+        } else {
+            cudaGetLastError();
+            m.embed_tokens_host.clear();
+        }
+    }
     // one-time: events, the stager, the host buffers (for the largest chunk), the identity page table
     for (int i = 0; i < RING_MAX; ++i) {
         if (cudaEventCreateWithFlags(&m.copied[i], cudaEventDisableTiming) != cudaSuccess) ok = false;
@@ -780,6 +802,37 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         pt.mark(kPfStart, cs);
         // ---- embeddings, broadcast to the four streams - or, in a later stage of a layer split, the rows the
         // previous stage handed on
+        const core::NativeEmbed* native_embed = core::native_embed();
+        const bool embed_batched = hand_in_ == nullptr && m.embed_tokens_dev != nullptr && native_embed != nullptr &&
+                                   prefill_env_enabled("STRATA_PF_EMBED_BATCH");
+        if (embed_batched) {
+            const size_t row_bytes = strata::kernels::iq_row_bytes(native_embed->type(), g.n_embd);
+            const uint64_t native_vocab = row_bytes != 0 && native_embed->bytes() % row_bytes == 0
+                                              ? native_embed->bytes() / row_bytes : 0;
+            if (native_vocab == 0) {
+                err = "prefill: invalid native embedding row geometry";
+                return false;
+            }
+            for (int64_t t = 0; t < T; ++t) {
+                // Image rows replace token rows; use a valid ID because the device gather has no bounds check.
+                if (embd_rows && embd_rows[p0 + t] != nullptr) {
+                    m.embed_tokens_host[(size_t) t] = 0;
+                    continue;
+                }
+                const int64_t token = tokens[c0 + t];
+                if (token < 0 || (uint64_t) token >= native_vocab || token > INT32_MAX) {
+                    err = "prefill: native batched embedding token is outside the table or int32 range";
+                    return false;
+                }
+                m.embed_tokens_host[(size_t) t] = (int32_t) token;
+            }
+            if (cudaMemcpyAsync(m.embed_tokens_dev, m.embed_tokens_host.data(), (size_t) T * sizeof(int32_t),
+                                cudaMemcpyHostToDevice, m.cs) != cudaSuccess) {
+                err = "prefill: the batched embedding token upload failed";
+                return false;
+            }
+            native_embed->gather_dev(m.embed_tokens_dev, T, m.emb, m.cs);
+        }
         if (hand_in_ != nullptr) {
             if (cudaMemcpyAsync(m.R, hand_in_ + (size_t) c0 * D, (size_t) T * D * 4, cudaMemcpyHostToDevice, m.cs) !=
                 cudaSuccess) {
@@ -794,6 +847,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     err = "prefill: the image embedding upload failed";
                     return false;
                 }
+            } else if (embed_batched) {
+                continue;
             } else if (!core::embed_row(*m.wt, g, tokens[c0 + t], m.emb + t * N, m.cs, err)) {
                 return false;
             }
@@ -1017,18 +1072,25 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     if (st.kv_q4) strata::kernels::fwht256_inplace_cuda(m.q, T * 24, m.cs);
                     rms_rows(m.q_idx, (const float*) wiqn->data, T * 4, 128, 128, EPS, m.cs);
                     rope(m.q_idx, T, 4, 128, 512, p0, (float) strata::kernels::qsa_freq_base(), m.cs);
-                    // the indexer appends, token by token; then scores + selection for many queries at once:
+                    // The indexer appends token by token by default; then scores + selection for many queries at once:
                     // a query reads completed blocks (final once completed) and `dead` for its own tail block
                     const strata::kernels::QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
                     pt.mark(kPfQsaIdx, cs);
-                    for (int64_t t = 0; t < T; ++t) {
-                        const int32_t* step_t = m.steps_dev + t * strata::kernels::kStepCount;
-                        try {
-                            strata::kernels::native_qsa_indexer_append(m.idx_raw + t * 128, step_t + strata::kernels::kStepPos, 0,
-                                                                       (const float*) wikn->data, EPS, ib, s, st.max_cells,
-                                                                       (float) strata::kernels::qsa_freq_base(), m.cs);
-                        } catch (const std::exception& e) { err = std::string("prefill indexer: ") + e.what(); return false; }
-                    }
+                    try {
+                        if (prefill_env_enabled("STRATA_PF_IDX_BATCH")) {
+                            strata::kernels::native_qsa_indexer_append_chunk(
+                                m.idx_raw, T, p0, 0, (const float*) wikn->data, EPS, ib, s, st.max_cells,
+                                (float) strata::kernels::qsa_freq_base(), m.cs);
+                        } else {
+                            for (int64_t t = 0; t < T; ++t) {
+                                const int32_t* step_t = m.steps_dev + t * strata::kernels::kStepCount;
+                                strata::kernels::native_qsa_indexer_append(
+                                    m.idx_raw + t * 128, step_t + strata::kernels::kStepPos, 0,
+                                    (const float*) wikn->data, EPS, ib, s, st.max_cells,
+                                    (float) strata::kernels::qsa_freq_base(), m.cs);
+                            }
+                        }
+                    } catch (const std::exception& e) { err = std::string("prefill indexer: ") + e.what(); return false; }
                     pt.mark(kPfQsaSel, cs);
                     for (int64_t t0 = 0; t0 < T; t0 += m.sel_batch) {
                         const int64_t nb = std::min(m.sel_batch, T - t0);
@@ -1433,6 +1495,11 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     }
     if (cudaStreamSynchronize(m.cs) != cudaSuccess) {
         err = std::string("prefill: ") + cudaGetErrorString(cudaGetLastError());
+        return false;
+    }
+    const cudaError_t copy_status = cudaStreamSynchronize(m.copy);
+    if (copy_status != cudaSuccess) {
+        err = std::string("prefill: expert copy stream: ") + cudaGetErrorString(copy_status);
         return false;
     }
     stats_.ms_total += ms_since(t_start);
