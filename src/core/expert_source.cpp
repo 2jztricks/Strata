@@ -38,6 +38,21 @@ namespace strata::core {
 
 namespace detail {
 
+bool cgroup_available_bytes(uint64_t limit, const CgroupMemoryStat& stat, uint64_t& bytes) {
+    bytes = 0;
+    if (!stat.valid) return false;
+
+    // memory.stat's inactive_file can race memory.current, so bound it to charged usage first.
+    uint64_t reclaimable = std::min(stat.inactive_file, stat.current);
+    reclaimable = stat.file_dirty >= reclaimable ? 0 : reclaimable - stat.file_dirty;
+    reclaimable = stat.file_writeback >= reclaimable ? 0 : reclaimable - stat.file_writeback;
+
+    // Reclaiming clean file pages reduces usage; saturating subtraction also handles a transient over-limit read.
+    const uint64_t usage_after_reclaim = stat.current - reclaimable;
+    bytes = usage_after_reclaim < limit ? limit - usage_after_reclaim : 0;
+    return true;
+}
+
 bool make_cache_complement_plan(
     int64_t n_layers, int64_t n_expert, const std::vector<uint64_t>& layer_blob_bytes,
     const std::vector<std::pair<int32_t, int32_t>>& primary_gpu_pairs,
@@ -123,6 +138,43 @@ const uint8_t* cache_complement_blob_or_fallback(
 namespace {
 constexpr uint64_t kPinnedMemoryHeadroom = 8ull << 30;
 
+#if defined(__linux__)
+bool read_cgroup_memory_stat(const std::filesystem::path& path, uint64_t current,
+                             detail::CgroupMemoryStat& stat) {
+    std::ifstream input(path / "memory.stat");
+    if (!input) return false;
+
+    bool inactive_file = false, file_dirty = false, file_writeback = false;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream fields(line);
+        std::string key;
+        uint64_t value = 0;
+        if (!(fields >> key >> value)) return false;
+        fields >> std::ws;
+        if (!fields.eof()) return false;
+
+        if (key == "inactive_file") {
+            if (inactive_file) return false;
+            inactive_file = true;
+            stat.inactive_file = value;
+        } else if (key == "file_dirty") {
+            if (file_dirty) return false;
+            file_dirty = true;
+            stat.file_dirty = value;
+        } else if (key == "file_writeback") {
+            if (file_writeback) return false;
+            file_writeback = true;
+            stat.file_writeback = value;
+        }
+    }
+    if (!input.eof() || !inactive_file || !file_dirty || !file_writeback) return false;
+    stat.current = current;
+    stat.valid = true;
+    return true;
+}
+#endif
+
 bool available_memory_bytes(uint64_t& bytes) {
 #if defined(_WIN32)
     MEMORYSTATUSEX status{};
@@ -167,7 +219,11 @@ bool available_memory_bytes(uint64_t& bytes) {
                     size_t consumed = 0;
                     const uint64_t cap = std::stoull(limit, &consumed);
                     if (consumed != limit.size()) return false;
-                    bytes = std::min(bytes, current < cap ? cap - current : uint64_t{0});
+                    detail::CgroupMemoryStat stat;
+                    if (!read_cgroup_memory_stat(path, current, stat)) return false;
+                    uint64_t cgroup_available = 0;
+                    if (!detail::cgroup_available_bytes(cap, stat, cgroup_available)) return false;
+                    bytes = std::min(bytes, cgroup_available);
                 } catch (...) { return false; }
             }
             if (path == root) break;

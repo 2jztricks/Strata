@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -205,11 +206,47 @@ void test_complement_plan() {
     require(!make_cache_complement_plan(2, 3, {0, 5}, {}, {}, offsets, bytes, error), "zero-size layer accepted");
 }
 
+void test_cgroup_memory_budget() {
+    using namespace strata::core::detail;
+    constexpr uint64_t GiB = 1ull << 30;
+    uint64_t bytes = 0;
+
+    CgroupMemoryStat clean_cache{40 * GiB, 32 * GiB, 0, 0, true};
+    require(cgroup_available_bytes(56 * GiB, clean_cache, bytes), "valid cgroup memory.stat was rejected");
+    require(bytes == 48 * GiB, "clean inactive file cache was not credited against the cgroup cap");
+
+    CgroupMemoryStat dirty_cache{40 * GiB, 32 * GiB, 4 * GiB, 2 * GiB, true};
+    require(cgroup_available_bytes(56 * GiB, dirty_cache, bytes), "valid dirty-cache counters were rejected");
+    require(bytes == 42 * GiB, "dirty/writeback pages were incorrectly counted as reclaimable");
+
+    CgroupMemoryStat oversized_inactive{10 * GiB, 20 * GiB, 0, 0, true};
+    require(cgroup_available_bytes(12 * GiB, oversized_inactive, bytes),
+            "valid oversized inactive-file counter was rejected");
+    require(bytes == 12 * GiB, "inactive-file accounting exceeded charged current usage");
+
+    const uint64_t max = std::numeric_limits<uint64_t>::max();
+    CgroupMemoryStat large_counters{max, max, max - 1, max, true};
+    require(cgroup_available_bytes(max, large_counters, bytes),
+            "large memory.stat counters were rejected");
+    require(bytes == 0, "dirty/writeback subtraction overflowed or escaped the usage cap");
+
+    CgroupMemoryStat usage_over_limit{60 * GiB, 0, 0, 0, true};
+    require(cgroup_available_bytes(56 * GiB, usage_over_limit, bytes),
+            "valid over-limit memory counters were rejected");
+    require(bytes == 0, "over-limit cgroup usage produced a positive budget");
+
+    CgroupMemoryStat missing_stat{};
+    bytes = 123;
+    require(!cgroup_available_bytes(56 * GiB, missing_stat, bytes) && bytes == 0,
+            "missing memory.stat counters did not fail closed");
+}
+
 }  // namespace
 
 int main() {
     try {
         test_complement_plan();
+        test_cgroup_memory_budget();
         test_canonical_layout();
 #if defined(STRATA_NATIVE_EXPERTS)
         test_native_variable_layout();

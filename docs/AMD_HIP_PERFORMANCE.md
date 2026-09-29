@@ -40,9 +40,12 @@ and `--vram-reserve-mib 1024`. Keep PLE on SSD.
 RAM. It requires mmap, a fixed expert profile, and disabled adaptation. It does
 not lock all data into RAM: temporary prefill borrowing and cache refill may
 still use the mapped fallback. Allocation needs sufficient available RAM;
-on Linux this option requires readable standard cgroup-v2 mounts. The guard
-checks available RAM and ancestor limits with 8 GiB headroom,
-but cannot reserve memory against concurrent system or process allocations.
+on Linux this option requires readable standard cgroup-v2 mounts. For each
+finite cgroup ancestor, the guard credits only `inactive_file` after subtracting
+`file_dirty` and `file_writeback`, capped by current usage; it remains bounded by
+the ancestor limit and host `MemAvailable`, with 8 GiB headroom. This accounts
+for reclaimable clean file cache but cannot reserve memory against concurrent
+system or process allocations.
 The POSIX PLE path issues direct reads through a configurable worker pool.
 
 Use a dedicated idle server, restart it between arms, and capture its engine log:
